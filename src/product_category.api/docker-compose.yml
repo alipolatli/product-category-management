@@ -1,0 +1,185 @@
+﻿version: '3.8'
+
+services:
+  zookeeper:
+    image: confluentinc/cp-zookeeper:latest
+    environment:
+      ZOOKEEPER_CLIENT_PORT: 2181
+      ZOOKEEPER_TICK_TIME: 2000
+    ports:
+      - 52181:2181
+
+  kafka:
+    image: confluentinc/cp-kafka:latest
+    depends_on:
+      - zookeeper
+    ports:
+      - 59092:59092
+    environment:
+      KAFKA_BROKER_ID: 1
+      KAFKA_ZOOKEEPER_CONNECT: zookeeper:2181
+      KAFKA_ADVERTISED_LISTENERS: PLAINTEXT://kafka:9092,PLAINTEXT_HOST://localhost:59092
+      KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: PLAINTEXT:PLAINTEXT,PLAINTEXT_HOST:PLAINTEXT
+      KAFKA_INTER_BROKER_LISTENER_NAME: PLAINTEXT
+      KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 1
+
+  kafka-ui:
+    image: provectuslabs/kafka-ui
+    container_name: kafka-ui
+    ports:
+      - "9091:8080"
+    restart: always
+    depends_on:
+      - kafka
+      - zookeeper
+    environment:
+      - KAFKA_CLUSTERS_0_NAME=local
+      - KAFKA_CLUSTERS_0_BOOTSTRAPSERVERS=kafka:9092
+      - KAFKA_CLUSTERS_0_ZOOKEEPER=zookeeper:2181
+
+  postgres:
+    image: debezium/example-postgres
+    restart: always
+    environment:
+      POSTGRES_PASSWORD: example
+    ports:
+      - 5432:5432
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    command:
+      - "postgres"
+      - "-c"
+      - "wal_level=logical"
+    volumes:
+      - ./resource/init.sql:/docker-entrypoint-initdb.d/create-db-tables.sql
+
+  debezium:
+    image: debezium/connect
+    depends_on:
+      - postgres
+      - kafka
+      - mongodb
+    ports:
+      - '8083:8083'
+    environment:
+      - BOOTSTRAP_SERVERS=kafka:9092
+      - GROUP_ID=medium_debezium
+      - CONFIG_STORAGE_TOPIC=my_connect_configs
+      - OFFSET_STORAGE_TOPIC=my_connect_offsets
+      - STATUS_STORAGE_TOPIC=my_connect_statuses
+      - PLUGIN_PATH=/debezium-connector-mongodb
+
+  mongodb:
+    image: debezium/example-mongodb
+    hostname: mongodb
+    ports:
+      - 27017:27017
+    environment:
+      - MONGODB_USER=debezium
+      - MONGODB_PASSWORD=dbz 
+
+  elasticsearch:
+    image: docker.elastic.co/elasticsearch/elasticsearch:8.7.1
+    expose:
+      - 9200
+    environment:
+      - xpack.security.enabled=false
+      - "discovery.type=single-node"
+      - ELASTIC_USERNAME=elastic
+      - ELASTIC_PASSWORD=DkIedPPSCb
+    networks:
+      - es-net
+    ports:
+      - 9200:9200
+    volumes:
+      - elasticsearch-data:/usr/share/elasticsearch/data
+
+  kibana:
+    image: docker.elastic.co/kibana/kibana:8.7.1
+    environment:
+      - ELASTICSEARCH_HOSTS=http://elasticsearch:9200
+    expose:
+      - 5601
+    networks:
+      - es-net
+    depends_on:
+      - elasticsearch
+    ports:
+      - 5601:5601
+    volumes:
+      - kibana-data:/usr/share/kibana/data
+
+  debezium-ui:
+    image: debezium/debezium-ui
+    container_name: debezium-ui
+    ports:
+      - "8084:8084"
+    environment:
+      - KAFKA_CONNECT_URIS=http://debezium:8083
+    depends_on:
+      - debezium
+
+networks:
+  es-net:
+    driver: bridge
+volumes:
+  elasticsearch-data:
+    driver: local
+  kibana-data:
+    driver: local
+
+
+# Mongo CDC   
+# (if not use exapmle-debezium){
+# docker exec -it mongo1 mongosh --eval "rs.initiate({_id:'myReplicaSet', members:[{_id:0, host:'mongo1'}, {_id:1, host:'mongo2'}, {_id:2, host:'mongo3'}]})"
+# https://www.mongodb.com/compatibility/deploying-a-mongodb-cluster-with-docker
+#docker exec -it mongo1 mongosh --eval "rs.status()"
+# }else
+# docker-compose -f docker-compose.yml exec mongodb bash -c '/usr/local/bin/init-inventory.sh' => created replica set.  
+# http://localhost:8083/connectors/
+# {
+#     "name": "inventory-connector",
+#     "config": {
+#         "connector.class" : "io.debezium.connector.mongodb.MongoDbConnector",
+#         "tasks.max" : "1",
+#         "mongodb.hosts" : "rs0/mongodb:27017",
+#         "mongodb.name" : "dbserver1",
+#         "mongodb.user" : "debezium",
+#         "mongodb.password" : "dbz",
+#         "database.include.list" : "inventory",
+#         "database.history.kafka.bootstrap.servers" : "kafka:9092",
+#         "key.converter.schemas.enable": "false", // JSON converter'ların şema kullanıp kullanmayacağı belirtiliyor
+#         "value.converter.schemas.enable": "false",
+#         "key.converter": "org.apache.kafka.connect.json.JsonConverter", // JSON converter'ların kullanılacağı belirtiliyor
+#         "value.converter": "org.apache.kafka.connect.json.JsonConverter"
+#     }
+# }
+
+# Postgres CDC
+# http://localhost:8083/connectors/
+# {
+#   "name": "debezium_steps-connector", // Oluşturulan connector'ün adı
+#   "config": {
+#     "tasks.max": "1", // Aynı anda çalıştırılacak task sayısı
+#     "connector.class": "io.debezium.connector.postgresql.PostgresConnector", // Kullanılacak connector sınıfı (Debezium'un PostgreSQL connector'ı)
+#     "database.history.kafka.bootstrap.servers": "kafka:9092", // Debezium'un izleme geçmişini saklamak için kullanılan Kafka topic'i ve bağlantı bilgileri
+#     "database.hostname": "postgres", // PostgreSQL sunucu adresi
+#     "database.port": "5432", // PostgreSQL sunucu portu
+#     "database.user": "postgres", // PostgreSQL kullanıcı adı
+#     "database.password": "example", // PostgreSQL kullanıcı şifresi
+#     "database.dbname": "debezium_steps", // PostgreSQL veritabanı adı
+#     "database.server.name": "debezium_steps_servername", // Kafka tarafında kullanılacak unique bir isim
+#     // "table.whitelist": "public.your_table_name", // İzlenmek istenen tablo (veya tablolar)
+#     "slot.name":"debeziumslot", //dbye açılacak slot
+#     "heartbeat.interval.ms":"1000",
+#     // "mode": "incrementing", // İzleme modu, örneğin: "incrementing" (artan sütun kullanılacaksa)
+#     // "incrementing.column.name": "your_incremental_column", // Artan sütunun adı (mode "incrementing" olduğunda kullanılır)
+#     // "database.history.kafka.topic": "schema-changes.my-postgres-server",
+#     "key.converter.schemas.enable": "false", // JSON converter'ların şema kullanıp kullanmayacağı belirtiliyor
+#     "value.converter.schemas.enable": "false",
+#     "key.converter": "org.apache.kafka.connect.json.JsonConverter", // JSON converter'ların kullanılacağı belirtiliyor
+#     "value.converter": "org.apache.kafka.connect.json.JsonConverter",
+#     "plugin.name":"pgoutput"
+#     // "poll.interval.ms": "10000" // Polling aralığı (veritabanındaki değişiklikleri kontrol etme sıklığı)
+#   }
+# }
